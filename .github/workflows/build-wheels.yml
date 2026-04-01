@@ -1,0 +1,108 @@
+name: Build Wheels
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Build platform'
+        required: false
+        default: 'ALL'
+        type: choice
+        options:
+          - ALL
+          - Linux
+          - Windows
+
+env:
+  CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-*"
+
+jobs:
+  prepare:
+    name: Prepare build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        env:
+          INPUT_PLATFORM: ${{ inputs.platform }}
+        run: |
+          case "${INPUT_PLATFORM}" in
+            Linux)   echo 'matrix=["ubuntu-latest","ubuntu-24.04-arm","ubuntu-22.04"]' >> "$GITHUB_OUTPUT" ;;
+            Windows) echo 'matrix=["windows-latest","windows-11-arm"]' >> "$GITHUB_OUTPUT" ;;
+            *)       echo 'matrix=["ubuntu-latest","ubuntu-24.04-arm","ubuntu-22.04","windows-latest","windows-11-arm"]' >> "$GITHUB_OUTPUT" ;;
+          esac
+
+  build:
+    name: Build wheels on ${{ matrix.os }}
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Set up Docker Buildx (Linux)
+        if: startsWith(matrix.os, 'ubuntu')
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build wujihandcpp (Linux)
+        if: startsWith(matrix.os, 'ubuntu')
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.package-builder
+          outputs: type=local,dest=build/wujihandcpp/
+          cache-from: type=gha,scope=wujihandcpp-build-${{ matrix.os }}
+          cache-to: type=gha,mode=max,scope=wujihandcpp-build-${{ matrix.os }}
+
+      - uses: actions/upload-artifact@v4
+        if: startsWith(matrix.os, 'ubuntu')
+        with:
+          name: build-wujihandcpp-${{ matrix.os }}
+          path: |
+            build/wujihandcpp/*.deb
+            build/wujihandcpp/*.rpm
+            build/wujihandcpp/*.zip
+
+      - name: Install dependencies with vcpkg (Windows)
+        if: startsWith(matrix.os, 'windows')
+        run: |
+          if ("${{ matrix.os }}" -eq "windows-latest") {
+            $VCPKG_TRIPLET = "x64-windows"
+          } elseif ("${{ matrix.os }}" -eq "windows-11-arm") {
+            $VCPKG_TRIPLET = "arm64-windows"
+          }
+          echo "VCPKG_TRIPLET=$VCPKG_TRIPLET" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          vcpkg install libusb:$VCPKG_TRIPLET
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install cibuildwheel
+        run: python -m pip install cibuildwheel
+
+      - name: Build wujihandpy (Linux)
+        if: startsWith(matrix.os, 'ubuntu')
+        run: python -m cibuildwheel --output-dir build/wujihandpy
+
+      - name: Build wujihandpy (Windows)
+        if: startsWith(matrix.os, 'windows')
+        run: |
+          $VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT -replace '\\','/'
+          $env:CIBW_ENVIRONMENT_WINDOWS = "VCPKG_ROOT=$VCPKG_ROOT VCPKG_TRIPLET=$env:VCPKG_TRIPLET"
+          python -m cibuildwheel --output-dir build/wujihandpy
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-wujihandpy-${{ matrix.os }}
+          path: build/wujihandpy/*.whl
